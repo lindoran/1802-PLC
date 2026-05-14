@@ -20,7 +20,10 @@ reading fixture wiring rather than running a general-purpose monitor.
 - `1802.jpg` - photo of the controller board
 - `ROM/D2716-ROM-lable-First-Fixture-R1.7.BIN` - raw 2048-byte EPROM dump
 - `ROM/D2716-ROM-lable-First-Fixture-R1.7.HEX` - Intel HEX version of the ROM
-- `ROM/src/D2716-ROM-R1_7.asm` - current generated 1802 disassembly
+- `ROM/src/D2716-ROM-R1_7-raw.asm` - raw generated 1802 disassembly without
+  ASCII heuristics
+- `ROM/src/D2716-ROM-R1_7.asm` - earlier generated disassembly with ASCII
+  heuristics
 - `ROM/src/disasm1802.c` - local CDP1802 disassembler used to produce the asm
 - `doc/RCA1802-Instruction-Set.pdf` - 1802 opcode reference
 - `doc/1802sum.pdf` - short 1802 quick-reference page
@@ -65,7 +68,8 @@ The early code uses many 1802 I/O and control-flow instructions:
 
 - `OUT 1`, `OUT 2`, `OUT 3`, `OUT 4`, `OUT 5`
 - `B1` / `BN1`, so external flag input `EF1` matters
-- `SEQ`, which drives the 1802 `Q` output
+- `B2` / `BN2`, so `EF2` also appears in early flow control
+- `SEQ` and `REQ`, which drive the 1802 `Q` output on and off
 - Many `SEP Rx` instructions, which is normal 1802 style for subroutine/threaded
   control flow
 
@@ -73,6 +77,40 @@ Initial constants and repeated setup patterns suggest the firmware is arranging
 registers as pointers into RAM/ROM and then using the 1802 I/O opcodes to strobe
 external ports. The visible use of `OUT 1` through `OUT 5` lines up well with the
 five CDP1852 devices.
+
+The raw disassembly makes two small I/O loops visible that were hidden by the
+ASCII heuristic:
+
+```asm
+014F  E4          SEX R4
+0150  61          OUT 1
+0151  62          OUT 2
+0152  D2          SEP R2
+0153  E5          SEX R5
+0154  61          OUT 1
+0155  62          OUT 2
+0156  D2          SEP R2
+0157  E6          SEX R6
+0158  61          OUT 1
+0159  62          OUT 2
+015A  30 4E       BR  0014EH
+```
+
+and:
+
+```asm
+0162  4F          LDA RF
+0163  B7          PHI R7
+0164  4F          LDA RF
+0165  A7          PLO R7
+0166  E7          SEX R7
+0167  61          OUT 1
+0168  62          OUT 2
+0169  30 5C       BR  0015CH
+```
+
+Those loops look like they are repeatedly outputting bytes through ports 1 and
+2 from register-selected buffers.
 
 The ROM label says `First Fixture R1.7`, so the current best guess is:
 
@@ -83,8 +121,9 @@ and output banks, but the ROM content looks application-specific.
 
 ## Disassembly Caution
 
-The current `ROM/src/D2716-ROM-R1_7.asm` is useful as a first pass, but should
-not be treated as final annotated source.
+`ROM/src/D2716-ROM-R1_7-raw.asm` is now the better starting point for control
+flow analysis. `ROM/src/D2716-ROM-R1_7.asm` is still useful for spotting
+printable regions, but should not be treated as final annotated source.
 
 The disassembler has a heuristic that emits any run of four printable bytes as
 `.ASCII`. That is too aggressive for 1802 code because valid instruction bytes
@@ -109,6 +148,12 @@ but the current disassembly can label them as strings such as `"ab0N"` or
 So the next analysis pass should use a raw decode or a control-flow-aware
 disassembler, then mark data only after reachable code paths are understood.
 
+The raw decode has the opposite problem in the later table area: from around
+`0x01CA` onward it decodes many printable data bytes as plausible-looking 1802
+instructions. For example, text bytes such as `FO  0A1A234TOC` naturally become
+`LDA`, `BR`, `BQ`, `BZ`, and `B1` mnemonics when decoded as code. That region is
+still likely data until there is evidence that execution actually reaches it.
+
 ## Current Working Theory
 
 Known:
@@ -117,6 +162,8 @@ Known:
 - The ROM image is a valid 2 KB D2716-sized dump.
 - The board contains five CDP1852 parallel I/O ICs.
 - The firmware uses CDP1802 I/O opcodes for ports 1 through 5.
+- The raw disassembly confirms real `OUT 1`/`OUT 2` loops at `0x014E` and
+  `0x015C`.
 - The EPROM label identifies it as `Test Fixture R1.7`.
 
 Likely:
@@ -138,14 +185,14 @@ Unknown:
 
 ## Suggested Next Steps
 
-1. Redo the disassembly without automatic ASCII detection.
-2. Build a reachable-code map from reset at `0x0000`.
-3. Identify all `OUT n`, `INP n`, `EF1`-`EF4`, and `Q` uses.
-4. Trace the five CDP1852 chip selects from the board to map ports 1-5.
-5. Decode the table region starting around `0x01CA`.
-6. Photograph or scan the back of the board so the address decode and I/O wiring
+1. Build a reachable-code map from reset at `0x0000` using
+   `ROM/src/D2716-ROM-R1_7-raw.asm`.
+2. Identify all `OUT n`, `INP n`, `EF1`-`EF4`, and `Q` uses.
+3. Trace the five CDP1852 chip selects from the board to map ports 1-5.
+4. Decode the table region starting around `0x01CA`.
+5. Photograph or scan the back of the board so the address decode and I/O wiring
    can be traced.
-7. If possible, dump any RAM/IO behavior on a powered board with a logic analyzer.
+6. If possible, dump any RAM/IO behavior on a powered board with a logic analyzer.
 
 ## Rebuilding The Current Disassembly
 
@@ -155,11 +202,12 @@ The provided disassembler builds cleanly with:
 cc -Wall -Wextra -o /tmp/disasm1802 ROM/src/disasm1802.c
 ```
 
-Current generated assembly can be regenerated with:
+The earlier heuristic assembly can be regenerated with:
 
 ```sh
 /tmp/disasm1802 ROM/D2716-ROM-lable-First-Fixture-R1.7.BIN > ROM/src/D2716-ROM-R1_7.asm
 ```
 
-For deeper reverse engineering, first change or bypass the ASCII heuristic so
-that executable-looking byte runs are not hidden as `.ASCII`.
+For deeper reverse engineering, use the raw disassembly as the control-flow
+baseline and use the heuristic disassembly only as a hint for likely data
+regions.
